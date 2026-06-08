@@ -1,4 +1,6 @@
+import json
 from enum import Enum
+from subprocess import check_output
 from time import sleep
 from typing import Optional
 
@@ -10,16 +12,37 @@ class PortInfo(object):
         from serial.tools.list_ports import grep
 
         self._rawinfo = rawinfo
-        _boardinfo: Optional[list[dict]] = rawinfo.get("matchingboards")
-        portinfo: Optional[dict] = rawinfo.get("port")
-        if _boardinfo is None or portinfo is None:
-            # TODO: Use appropriate exception
-            raise Exception()
-        boardinfo: dict = _boardinfo[0]
-        self.__board: Optional[str] = boardinfo.get("name")
-        self.__fqbn: Optional[str] = boardinfo.get("fqbn")
-        self.__port: Optional[str] = portinfo.get("address")
-        if self.__port is not None:
+
+        self.__board: Optional[str] = None
+        self.__fqbn: Optional[str] = None
+        self.__port: Optional[str] = None
+        self.__serial_number: Optional[str] = None
+
+        boardinfo_list: Optional[list[dict]] = (
+            rawinfo.get("matching_boards")
+            or rawinfo.get("matchingboards")
+            or rawinfo.get("boards")
+        )
+
+        portinfo: Optional[dict] = rawinfo.get("port") or rawinfo
+
+        if not boardinfo_list or portinfo is None:
+            raise ValueError(f"Invalid Arduino board info: {rawinfo}")
+
+        boardinfo: dict = boardinfo_list[0]
+
+        self.__board = boardinfo.get("name")
+        self.__fqbn = boardinfo.get("fqbn")
+        self.__port = portinfo.get("address")
+
+        properties = portinfo.get("properties") or {}
+        self.__serial_number = (
+            rawinfo.get("serial_number")
+            or properties.get("serialNumber")
+            or properties.get("serial_number")
+        )
+
+        if self.__serial_number is None and self.__port is not None:
             ports = list(grep(self.__port))
             if len(ports) > 0:
                 self.__serial_number = ports[0].serial_number
@@ -44,26 +67,58 @@ class PortInfo(object):
         return f"{self.board} at {self.port}"
 
     def detail(self) -> dict:
-        from yaml import safe_load
-        from subprocess import check_output
+        if self.port is None:
+            raise ValueError("Port is not available")
 
-        return safe_load(
-            check_output(
-                f"arduino-cli monitor -p {self.port} --describe --format yaml",
-                shell=True,
-            )
+        output = check_output(
+            [
+                "arduino-cli",
+                "monitor",
+                "-p",
+                self.port,
+                "--describe",
+                "--format",
+                "json",
+            ],
+            text=True,
         )
+        return json.loads(output)
 
     def to_dict(self) -> dict:
-        return {"board": self.board, "port": self.port, "fqbn": self.fqbn}
+        return {
+            "board": self.board,
+            "port": self.port,
+            "fqbn": self.fqbn,
+            "serial_number": self.serial_number,
+        }
 
 
 def check_connected_board_info() -> list[PortInfo]:
-    from yaml import safe_load
-    from subprocess import check_output
-
-    detected = safe_load(
-        check_output("arduino-cli board list --format yaml", shell=True).decode("utf-8")
+    output = check_output(
+        [
+            "arduino-cli",
+            "board",
+            "list",
+            "--format",
+            "json",
+        ],
+        text=True,
     )
-    boards_raw_info = filter(lambda d: d["matchingboards"] != [], detected)
+
+    detected = json.loads(output)
+
+    if isinstance(detected, dict):
+        detected_ports = detected.get("detected_ports", [])
+    else:
+        detected_ports = detected
+
+    boards_raw_info = [
+        d for d in detected_ports
+        if (
+            d.get("matching_boards")
+            or d.get("matchingboards")
+            or d.get("boards")
+        )
+    ]
+
     return list(map(PortInfo, boards_raw_info))
